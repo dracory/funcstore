@@ -132,6 +132,8 @@ func (g *groupImplementation) SetUpdatedAt(updatedAt string) GroupInterface {
 
 // GroupFilter is used to list groups.
 // Parent, when non-empty, matches groups whose parent path or ID equals it.
+// Recursive, when true, returns all descendant groups instead of only
+// direct children.
 type GroupFilter struct {
 	Parent    string
 	Recursive bool

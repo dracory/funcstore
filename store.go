@@ -10,9 +10,12 @@ import (
 // store (NewStore) works with any *sql.DB (SQLite, MySQL, Postgres, etc.).
 type StoreInterface interface {
 	// MigrateUp creates the funcstore tables and default root group.
-	MigrateUp(ctx context.Context, tx ...*sql.Tx) error
+	MigrateUp(ctx context.Context) error
 	// MigrateDown drops the funcstore tables.
-	MigrateDown(ctx context.Context, tx ...*sql.Tx) error
+	MigrateDown(ctx context.Context) error
+
+	// RegisterRuntime adds a Runtime to the store after construction.
+	RegisterRuntime(r Runtime)
 
 	// GroupCreate inserts a new group and returns it with resolved Path.
 	// Parent may be a group ID or path; an empty Parent creates a root group.
@@ -55,7 +58,8 @@ type StoreInterface interface {
 	FunctionDelete(ctx context.Context, id string) error
 
 	// FunctionVersionList returns all saved source versions for a function,
-	// ordered newest-first by created_at.
+	// ordered newest-first by ID (UUIDv7 IDs are time-ordered, which is more
+	// precise than the second-resolution created_at timestamps).
 	FunctionVersionList(ctx context.Context, functionID string) ([]FunctionVersionInterface, error)
 
 	// FunctionVersionGet retrieves a single version by its ID.

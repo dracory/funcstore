@@ -39,7 +39,9 @@ type FunctionInterface interface {
 	// SetTimeoutMs sets the timeout in milliseconds.
 	SetTimeoutMs(timeoutMs int64) FunctionInterface
 
-	// MemLimit — per-function memory limit in bytes
+	// MemLimit — per-function memory limit in bytes.
+	// NOTE: this value is persisted but not currently enforced by any
+	// runtime; in-process interpreters cannot reliably cap memory usage.
 	// GetMemLimit returns the memory limit in bytes.
 	GetMemLimit() int64
 	// SetMemLimit sets the memory limit in bytes.

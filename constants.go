@@ -44,6 +44,7 @@ var (
 	ErrPanic          = errors.New("funcstore: runtime panic")
 	ErrUnknownRuntime = errors.New("funcstore: unknown runtime")
 	ErrAliasTaken     = errors.New("funcstore: alias already taken")
+	ErrAliasAmbiguous = errors.New("funcstore: alias exists in multiple groups")
 	ErrInvalidID      = errors.New("funcstore: invalid function ID")
 )
 

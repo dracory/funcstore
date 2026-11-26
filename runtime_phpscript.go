@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
-	"github.com/titpetric/phpscript/model"
 	"github.com/titpetric/phpscript/runner"
 	"github.com/titpetric/phpscript/stdlib"
 )
@@ -23,41 +23,66 @@ func NewPhpscriptRuntime() Runtime {
 	return &phpscriptRuntime{}
 }
 
-func (r *phpscriptRuntime) Name() string {
-	return "php"
-}
-
 // phpFilesRoot is the sandbox root for PHP filesystem functions. Scripts
 // cannot escape it; it is shared across functions.
 const phpFilesRoot = "data/faas/files"
 
-func (r *phpscriptRuntime) Compile(source string) (Program, error) {
-	var buf bytes.Buffer
-	rt := runner.New(&buf, runner.Options{})
+// phpFilesOnce ensures the sandbox root is created at most once per process
+// instead of on every compile.
+var (
+	phpFilesOnce sync.Once
+	phpFilesOK   bool
+)
+
+func ensurePHPFilesRoot() bool {
+	phpFilesOnce.Do(func() {
+		phpFilesOK = os.MkdirAll(phpFilesRoot, 0o755) == nil
+	})
+	return phpFilesOK
+}
+
+// newRunner builds a fresh interpreter runtime writing to buf.
+func newRunner(buf *bytes.Buffer) *runner.Runtime {
+	rt := runner.New(buf, runner.Options{})
 	stdlib.Register(rt)
-	if err := os.MkdirAll(phpFilesRoot, 0o755); err == nil {
+	if ensurePHPFilesRoot() {
 		stdlib.RegisterFS(rt, phpFilesRoot)
 	}
+	return rt
+}
 
-	prog, err := rt.Load(source)
-	if err != nil {
+func (r *phpscriptRuntime) Name() string {
+	return "php"
+}
+
+func (r *phpscriptRuntime) Compile(source string) (Program, error) {
+	// Parse once to validate the source (fail fast); each Run re-parses into
+	// its own interpreter instance so programs are safe for concurrent use
+	// and share no state between invocations.
+	var buf bytes.Buffer
+	rt := newRunner(&buf)
+	if _, err := rt.Load(source); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRuntime, err)
 	}
 
-	return &phpscriptProgram{rt: rt, prog: prog, buf: &buf}, nil
+	return &phpscriptProgram{source: source}, nil
 }
 
-// phpscriptProgram implements Program. The interpreter runtime is created
-// at Compile time; each Run re-registers the request superglobals and
-// re-executes the parsed program.
+// phpscriptProgram implements Program. It keeps only the source text; Run
+// constructs a fresh runner, output buffer, and request context per call,
+// so concurrent Run calls never share mutable state.
 type phpscriptProgram struct {
-	rt   *runner.Runtime
-	prog *model.Program
-	buf  *bytes.Buffer
+	source string
 }
 
 func (p *phpscriptProgram) Run(input any) (any, error) {
-	p.buf.Reset()
+	var buf bytes.Buffer
+	rt := newRunner(&buf)
+
+	prog, err := rt.Load(p.source)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRuntime, err)
+	}
 
 	c := runner.NewContext()
 	if m, ok := input.(map[string]interface{}); ok {
@@ -79,9 +104,9 @@ func (p *phpscriptProgram) Run(input any) (any, error) {
 			}
 		}
 	}
-	c.Register(p.rt)
+	c.Register(rt)
 
-	if err := p.rt.Run(p.prog); err != nil {
+	if err := rt.Run(prog); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRuntime, err)
 	}
 
@@ -96,6 +121,6 @@ func (p *phpscriptProgram) Run(input any) (any, error) {
 
 	return map[string]interface{}{
 		"headers": headers,
-		"body":    p.buf.String(),
+		"body":    buf.String(),
 	}, nil
 }

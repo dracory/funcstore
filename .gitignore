@@ -32,3 +32,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Runtime artifacts (PHP sandbox root created during tests)
+/data/

@@ -90,7 +90,7 @@ func (s *storeSQL) RegisterRuntime(r Runtime) {
 
 // MigrateUp creates the groups and functions tables if they do not exist
 // and ensures a "default" root group exists.
-func (s *storeSQL) MigrateUp(ctx context.Context, tx ...*sql.Tx) error {
+func (s *storeSQL) MigrateUp(ctx context.Context) error {
 	if !s.neatDB.Schema().HasTable(s.groupsTableName) {
 		if err := s.neatDB.Schema().Create(s.groupsTableName, func(table schema.Blueprint) {
 			table.String(COLUMN_GROUP_ID_G, 36)
@@ -116,7 +116,7 @@ func (s *storeSQL) MigrateUp(ctx context.Context, tx ...*sql.Tx) error {
 			table.String(COLUMN_GROUP_ID, 36)
 			table.Index(COLUMN_GROUP_ID)
 			table.String(COLUMN_ALIAS, 255).Nullable()
-			table.Text(COLUMN_ALIAS_PATH).Nullable()
+			table.String(COLUMN_ALIAS_PATH, 512).Nullable()
 			table.Unique(COLUMN_ALIAS_PATH)
 			table.String(COLUMN_NAME, 255).Nullable()
 			table.String(COLUMN_RUNTIME, 50)
@@ -155,7 +155,7 @@ func (s *storeSQL) MigrateUp(ctx context.Context, tx ...*sql.Tx) error {
 }
 
 // MigrateDown drops the functions, versions, and groups tables if they exist.
-func (s *storeSQL) MigrateDown(ctx context.Context, tx ...*sql.Tx) error {
+func (s *storeSQL) MigrateDown(ctx context.Context) error {
 	if err := s.neatDB.Schema().DropIfExists(s.versionsTableName); err != nil {
 		return err
 	}
@@ -251,9 +251,16 @@ func (s *storeSQL) GroupList(ctx context.Context, filter GroupFilter) ([]GroupIn
 			}
 			return nil, err
 		}
-		q := fmt.Sprintf("SELECT id, slug, parent_id, path, description, metadata, created_at, updated_at FROM %s WHERE parent_id = %s ORDER BY slug",
-			s.groupsTableName, s.placeholder(1))
-		rows, err = s.db.QueryContext(ctx, q, parent.GetID())
+		if filter.Recursive {
+			pattern := escapeLike(parent.GetPath()) + "/%"
+			q := fmt.Sprintf("SELECT id, slug, parent_id, path, description, metadata, created_at, updated_at FROM %s WHERE path LIKE %s ESCAPE '\\' ORDER BY path",
+				s.groupsTableName, s.placeholder(1))
+			rows, err = s.db.QueryContext(ctx, q, pattern)
+		} else {
+			q := fmt.Sprintf("SELECT id, slug, parent_id, path, description, metadata, created_at, updated_at FROM %s WHERE parent_id = %s ORDER BY slug",
+				s.groupsTableName, s.placeholder(1))
+			rows, err = s.db.QueryContext(ctx, q, parent.GetID())
+		}
 	} else {
 		q := fmt.Sprintf("SELECT id, slug, parent_id, path, description, metadata, created_at, updated_at FROM %s ORDER BY path",
 			s.groupsTableName)
@@ -328,20 +335,36 @@ func (s *storeSQL) GroupDelete(ctx context.Context, id string, opts DeleteOpts) 
 	}
 
 	if opts.Cascade {
-		// Delete all functions in this group and its descendants.
-		pattern := g.GetPath() + "/%"
-		qDelFuncs := fmt.Sprintf("DELETE FROM %s WHERE group_id IN (SELECT id FROM %s WHERE path LIKE %s OR id = %s)",
-			s.tableName, s.groupsTableName, s.placeholder(1), s.placeholder(2))
-		if _, err := s.db.ExecContext(ctx, qDelFuncs, pattern, g.GetID()); err != nil {
+		// Delete versions, functions, and groups in this group and its
+		// descendants — atomically, so a failure partway through cannot
+		// leave the store half-deleted.
+		pattern := escapeLike(g.GetPath()) + "/%"
+		groupIDs := fmt.Sprintf("(SELECT id FROM %s WHERE path LIKE %s ESCAPE '\\' OR id = %s)",
+			s.groupsTableName, s.placeholder(1), s.placeholder(2))
+
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("funcstore: begin delete tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		qDelVersions := fmt.Sprintf("DELETE FROM %s WHERE function_id IN (SELECT id FROM %s WHERE group_id IN %s)",
+			s.versionsTableName, s.tableName, groupIDs)
+		if _, err := tx.ExecContext(ctx, qDelVersions, pattern, g.GetID()); err != nil {
+			return fmt.Errorf("funcstore: delete group function versions: %w", err)
+		}
+
+		qDelFuncs := fmt.Sprintf("DELETE FROM %s WHERE group_id IN %s", s.tableName, groupIDs)
+		if _, err := tx.ExecContext(ctx, qDelFuncs, pattern, g.GetID()); err != nil {
 			return fmt.Errorf("funcstore: delete group functions: %w", err)
 		}
-		// Delete all descendant groups, then the group itself.
-		qDelGroups := fmt.Sprintf("DELETE FROM %s WHERE path LIKE %s OR id = %s",
+
+		qDelGroups := fmt.Sprintf("DELETE FROM %s WHERE path LIKE %s ESCAPE '\\' OR id = %s",
 			s.groupsTableName, s.placeholder(1), s.placeholder(2))
-		if _, err := s.db.ExecContext(ctx, qDelGroups, pattern, g.GetID()); err != nil {
+		if _, err := tx.ExecContext(ctx, qDelGroups, pattern, g.GetID()); err != nil {
 			return fmt.Errorf("funcstore: delete groups: %w", err)
 		}
-		return nil
+		return tx.Commit()
 	}
 
 	// Delete group only.
@@ -450,17 +473,37 @@ func (s *storeSQL) FunctionFindByAlias(ctx context.Context, alias string) (Funct
 	}
 
 	// Otherwise treat it as an alias leaf (global fallback, mainly for the default group).
+	// The same leaf alias may exist in several groups; rather than returning an
+	// arbitrary one, report the ambiguity so the caller can use the full path.
 	q := fmt.Sprintf("SELECT id, group_id, alias, alias_path, name, runtime, source, timeout_ms, mem_limit, metadata, created_at, updated_at FROM %s WHERE alias = %s",
 		s.tableName, s.placeholder(1))
-	row := s.db.QueryRowContext(ctx, q, alias)
-	fn, err := s.scanFunction(row)
+	rows, err := s.db.QueryContext(ctx, q, alias)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
 		return nil, fmt.Errorf("funcstore: find by alias: %w", err)
 	}
-	return fn, nil
+	defer rows.Close()
+
+	var found FunctionInterface
+	count := 0
+	for rows.Next() {
+		count++
+		if count == 1 {
+			found, err = s.scanFunction(rows)
+			if err != nil {
+				return nil, fmt.Errorf("funcstore: find by alias scan: %w", err)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("funcstore: find by alias rows: %w", err)
+	}
+	if count == 0 {
+		return nil, ErrNotFound
+	}
+	if count > 1 {
+		return nil, fmt.Errorf("%w: %q (use the full alias path)", ErrAliasAmbiguous, alias)
+	}
+	return found, nil
 }
 
 func (s *storeSQL) FunctionInvoke(ctx context.Context, key string, input any) (any, error) {
@@ -518,6 +561,20 @@ func (s *storeSQL) FunctionList(ctx context.Context) ([]FunctionInterface, error
 func (s *storeSQL) FunctionUpdate(ctx context.Context, fn FunctionInterface) error {
 	if fn.GetID() == "" {
 		return ErrInvalidID
+	}
+
+	// Verify the runtime is registered and the new source compiles, matching
+	// the fail-fast behaviour of FunctionCreate. This runs before any
+	// snapshot so a rejected update leaves no trace.
+	if fn.GetRuntime() == "" {
+		return errors.New("funcstore: Runtime is required")
+	}
+	r := s.getRuntime(fn.GetRuntime())
+	if r == nil {
+		return fmt.Errorf("%w: %q", ErrUnknownRuntime, fn.GetRuntime())
+	}
+	if _, err := r.Compile(fn.GetSource()); err != nil {
+		return err
 	}
 
 	// Auto-snapshot: if the source is changing, save the old source to the
@@ -584,8 +641,21 @@ func (s *storeSQL) FunctionDelete(ctx context.Context, id string) error {
 		return ErrInvalidID
 	}
 
+	// Delete the function and its saved versions atomically so no orphaned
+	// version rows are left behind.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("funcstore: begin delete tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	qv := fmt.Sprintf("DELETE FROM %s WHERE function_id = %s", s.versionsTableName, s.placeholder(1))
+	if _, err := tx.ExecContext(ctx, qv, id); err != nil {
+		return fmt.Errorf("funcstore: delete function versions: %w", err)
+	}
+
 	q := fmt.Sprintf("DELETE FROM %s WHERE id = %s", s.tableName, s.placeholder(1))
-	res, err := s.db.ExecContext(ctx, q, id)
+	res, err := tx.ExecContext(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("funcstore: delete: %w", err)
 	}
@@ -594,7 +664,7 @@ func (s *storeSQL) FunctionDelete(ctx context.Context, id string) error {
 	if rows == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // === Function Versions =====================================================
@@ -776,6 +846,9 @@ func (s *storeSQL) validateAndSetAliasPath(ctx context.Context, fn FunctionInter
 		fn.SetAliasPath("")
 		return nil
 	}
+	if strings.Contains(fn.GetAlias(), "/") {
+		return errors.New("funcstore: alias cannot contain '/'")
+	}
 
 	group, err := s.GroupFindByID(ctx, fn.GetGroupID())
 	if err != nil {
@@ -836,10 +909,25 @@ func (s *storeSQL) runWithTimeout(ctx context.Context, prog Program, input any, 
 		done <- result{out, err}
 	}()
 
+	// If the program supports interruption (e.g. the goja runtime), stop the
+	// abandoned goroutine instead of letting it run forever. Runtimes that
+	// cannot be interrupted still leak their goroutine — a fundamental
+	// limitation of in-process execution.
+	interrupt := func() {
+		if ip, ok := prog.(interface{ Interrupt() }); ok {
+			ip.Interrupt()
+		}
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
-	case <-time.After(timeout):
+	case <-timer.C:
+		interrupt()
 		return nil, ErrTimeout
 	case <-ctx.Done():
+		interrupt()
 		return nil, ctx.Err()
 	case res := <-done:
 		return res.out, res.err
@@ -882,6 +970,13 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
+// escapeLike escapes the LIKE wildcard characters in s so it can be embedded
+// in a LIKE pattern with ESCAPE '\'. Without this, group slugs containing
+// '_' or '%' would match unrelated paths.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -897,6 +992,9 @@ func (s *storeSQL) scanFunction(sc scanner) (FunctionInterface, error) {
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 

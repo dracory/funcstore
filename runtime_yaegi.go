@@ -12,6 +12,12 @@ import (
 // yaegiRuntime implements Runtime using Yaegi, a Go interpreter.
 // Function sources are complete Go programs (package main) that must
 // define: func faasRun(input map[string]interface{}) interface{}
+//
+// SECURITY: the interpreter exposes most of the Go standard library to
+// scripts, including os, net, net/http, syscall and unsafe. Function
+// sources must be treated as trusted code with the same privileges as the
+// host process — this runtime is NOT a sandbox. Do not register it when
+// function authors are untrusted.
 type yaegiRuntime struct{}
 
 // NewYaegiRuntime creates a Go runtime backed by Yaegi.
@@ -71,9 +77,14 @@ type yaegiProgram struct {
 }
 
 func (p *yaegiProgram) Run(input any) (any, error) {
-	m, _ := input.(map[string]interface{})
-	if m == nil {
-		m = map[string]interface{}{}
+	if input == nil {
+		return p.run(map[string]interface{}{}), nil
+	}
+	m, ok := input.(map[string]interface{})
+	if !ok {
+		// Reject rather than silently substituting an empty map, so callers
+		// notice type mismatches instead of debugging phantom behaviour.
+		return nil, fmt.Errorf("%w: yaegi runtime requires input of type map[string]interface{}", ErrRuntime)
 	}
 	return p.run(m), nil
 }
