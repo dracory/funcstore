@@ -2,6 +2,7 @@ package funcstore
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -95,6 +96,8 @@ func TestPhpscriptRuntimeHeaderPropagation(t *testing.T) {
 }
 
 func TestPhpscriptRuntimeIncludeFromSandbox(t *testing.T) {
+	t.Cleanup(func() { os.Remove("data/faas/files/include-test-lib.php") })
+
 	r := NewPhpscriptRuntime()
 
 	// The self-extracting multi-file pattern: the script writes a library
