@@ -43,7 +43,15 @@ func ensurePHPFilesRoot() bool {
 
 // newRunner builds a fresh interpreter runtime writing to buf.
 func newRunner(buf *bytes.Buffer) *runner.Runtime {
-	rt := runner.New(buf, runner.Options{})
+	opts := runner.Options{}
+	if ensurePHPFilesRoot() {
+		// Point the source filesystem at the same sandbox the filesystem
+		// bindings use, so include/require resolve files the script itself
+		// has written there. phpscript clamps ".." at the root, so scripts
+		// cannot climb out of the sandbox through include paths.
+		opts.RootFS = os.DirFS(phpFilesRoot)
+	}
+	rt := runner.New(buf, opts)
 	stdlib.Register(rt)
 	if ensurePHPFilesRoot() {
 		stdlib.RegisterFS(rt, phpFilesRoot)
