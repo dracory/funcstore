@@ -143,3 +143,62 @@ func TestPhpscriptRuntimeIncludeCannotEscapeSandbox(t *testing.T) {
 		t.Errorf("Run() error = %v, want it to name the missing file", err)
 	}
 }
+
+// TestPhpscriptRuntimeRedirectStatus verifies the status staged by
+// header('Location: ...') reaches the host as a "status" field.
+func TestPhpscriptRuntimeRedirectStatus(t *testing.T) {
+	r := NewPhpscriptRuntime()
+
+	prog, err := r.Compile(`<?php header("Location: /target"); echo "redirecting";`)
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want nil", err)
+	}
+
+	out, err := prog.Run(map[string]any{})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	m, _ := out.(map[string]interface{})
+	status, ok := m["status"].(int64)
+	if !ok {
+		t.Fatalf("expected int64 status field, got: %v", m["status"])
+	}
+	if status != 302 {
+		t.Errorf("expected status 302, got %d", status)
+	}
+}
+
+// TestPhpscriptRuntimeExplicitStatus verifies http_response_code() carries
+// through as well, and that a default 200 response adds no status field.
+func TestPhpscriptRuntimeExplicitStatus(t *testing.T) {
+	r := NewPhpscriptRuntime()
+
+	prog, err := r.Compile(`<?php http_response_code(404); echo "missing";`)
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want nil", err)
+	}
+
+	out, err := prog.Run(map[string]any{})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	m, _ := out.(map[string]interface{})
+	if m["status"] != int64(404) {
+		t.Errorf("expected status 404, got: %v", m["status"])
+	}
+
+	plain, err := r.Compile(`<?php echo "ok";`)
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want nil", err)
+	}
+	out2, err := plain.Run(map[string]any{})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	m2, _ := out2.(map[string]interface{})
+	if _, has := m2["status"]; has {
+		t.Errorf("plain 200 response should carry no status field, got: %v", m2["status"])
+	}
+}

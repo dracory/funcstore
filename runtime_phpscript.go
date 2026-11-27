@@ -127,8 +127,15 @@ func (p *phpscriptProgram) Run(input any) (any, error) {
 		}
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"headers": headers,
 		"body":    buf.String(),
-	}, nil
+	}
+	// header('Location: ...') and http_response_code() stage a status in the
+	// request context; carry it through so hosts can honour real PHP
+	// redirect/error semantics.
+	if status := c.ResponseStatus(); status != 0 && status != 200 {
+		result["status"] = int64(status)
+	}
+	return result, nil
 }
