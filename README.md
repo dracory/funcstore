@@ -8,9 +8,10 @@ serverless functions (FaaS). Store a function once, get an ID, invoke it
 anywhere — in any supported runtime.
 
 It is runtime-agnostic by design: runtimes are pluggable via the `Runtime`
-interface rather than bolted on. Ships with three runtimes:
+interface rather than bolted on. Ships with four runtimes:
 
 - **js** — JavaScript via [`dop251/goja`](https://github.com/dop251/goja)
+- **js-ekuma** — JavaScript via [`hajimehoshi/ekuma`](https://github.com/hajimehoshi/ekuma) (ES2026, pure Go; API is unstable)
 - **go** — Go via [`traefik/yaegi`](https://github.com/traefik/yaegi) (Go interpreter)
 - **php** — PHP via [`titpetric/phpscript`](https://github.com/titpetric/phpscript)
 
@@ -120,6 +121,7 @@ with a per-invocation timeout. Register the ones you need via
 ```go
 Runtimes: []funcstore.Runtime{
     funcstore.NewGojaRuntime(),
+    funcstore.NewEkumaRuntime(),
     funcstore.NewYaegiRuntime(),
     funcstore.NewPhpscriptRuntime(),
 }

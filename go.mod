@@ -6,6 +6,7 @@ require (
 	github.com/dop251/goja v0.0.0-20261125210501-5e92a7e24d0c
 	github.com/dracory/dataobject v1.8.1
 	github.com/dracory/neat v0.62.2
+	github.com/hajimehoshi/ekuma v0.2.0
 	github.com/titpetric/phpscript v0.7.0
 	github.com/traefik/yaegi v0.16.3
 	golang.org/x/crypto v0.59.0
